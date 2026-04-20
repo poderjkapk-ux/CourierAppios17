@@ -1,17 +1,16 @@
 import SwiftUI
 
 struct MainTabView: View {
-    // Стан для вибору активної вкладки (аналог selectedItem у Compose)
+    // Стан для вибору активної вкладки
     @State private var selectedTab = 0
     
-    // Підключаємо NetworkManager для відстеження подій (наприклад, бейджів на іконках)
+    // Підключаємо NetworkManager для відстеження подій
     @ObservedObject private var networkManager = NetworkManager.shared
     
     var body: some View {
         TabView(selection: $selectedTab) {
             
             // Вкладка 1: Список доступних замовлень
-            // Аналог "orders" / Icons.Default.List у Screens.kt
             NavigationView {
                 OrdersView()
             }
@@ -21,7 +20,6 @@ struct MainTabView: View {
             .tag(0)
             
             // Вкладка 2: Активні замовлення в роботі
-            // Аналог "active" / Icons.Default.ShoppingBag у Screens.kt
             NavigationView {
                 ActiveOrderView()
             }
@@ -30,17 +28,25 @@ struct MainTabView: View {
             }
             .tag(1)
             
-            // Вкладка 3: Профіль кур'єра та статистика
-            // Аналог "profile" / Icons.Default.Person у Screens.kt
+            // Вкладка 3: Історія замовлень (ДОДАНО)
+            NavigationView {
+                HistoryView()
+            }
+            .tabItem {
+                Label("Історія", systemImage: "clock.fill")
+            }
+            .tag(2)
+            
+            // Вкладка 4: Профіль кур'єра та статистика
             NavigationView {
                 ProfileView()
             }
             .tabItem {
                 Label("Профіль", systemImage: "person.fill")
             }
-            .tag(2)
+            .tag(3)
         }
-        // Встановлюємо акцентний колір для активної вкладки (синій, як у вашому Android UI)
+        // Встановлюємо акцентний колір для активної вкладки
         .accentColor(.blue)
         .onReceive(networkManager.wsEventPublisher) { event in
             handleGlobalEvents(event)
@@ -51,8 +57,7 @@ struct MainTabView: View {
     private func handleGlobalEvents(_ event: WSEvent) {
         switch event {
         case .newOrder:
-            // Якщо прийшло нове замовлення, можна автоматично перемкнути на вкладку списку
-            // або просто подати вібро-сигнал
+            // Якщо прийшло нове замовлення
             UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
             
         case .directOffer:

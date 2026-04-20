@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 
 // MARK: - Дизайн-система (Кольори)
 struct AppColors {
@@ -8,27 +9,30 @@ struct AppColors {
     static let error = Color.red
     static let warning = Color.orange
     static let textSecondary = Color.gray
+    static let info = Color.blue
+    static let surface = Color.white
 }
 
 struct OrdersView: View {
     @AppStorage("cookie") var savedCookie: String = ""
     @StateObject private var networkManager = NetworkManager.shared
+    @StateObject private var locationManager = LocationManager()
     
     @State private var orders: [OpenOrder] = []
     @State private var announcements: [Announcement] = []
     @State private var isOnline: Bool = false
     @State private var isLoading = false
     
-    // Для демо-симуляції координат (в реальному житті беремо з LocationManager)
-    @State private var currentLat: Double = 46.4825
-    @State private var currentLon: Double = 30.7233
+    // Стан для персонального замовлення (Direct Offer)
+    @State private var directOffer: OpenOrder? = nil
+    @State private var isActionLoading = false
     
     var body: some View {
         ZStack {
             AppColors.background.ignoresSafeArea()
             
             VStack(spacing: 0) {
-                // MARK: Власна панель навігації (TopBar)
+                // MARK: - TopBar
                 HStack {
                     Text("Доступні")
                         .font(.system(size: 28, weight: .heavy, design: .rounded))
@@ -36,7 +40,11 @@ struct OrdersView: View {
                     
                     Spacer()
                     
-                    // Кнопка статусу Онлайн/Офлайн
+                    // Годинник
+                    CurrentTimeView()
+                        .padding(.trailing, 8)
+                    
+                    // Кнопка статусу
                     Button(action: toggleStatus) {
                         HStack(spacing: 6) {
                             Circle()
@@ -49,19 +57,23 @@ struct OrdersView: View {
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(
-                            (isOnline ? AppColors.secondary : AppColors.textSecondary).opacity(0.15)
-                        )
+                        .background((isOnline ? AppColors.secondary : AppColors.textSecondary).opacity(0.15))
                         .clipShape(Capsule())
                     }
                 }
                 .padding(.horizontal)
                 .padding(.bottom, 10)
                 
-                // MARK: Список замовлень з Pull-to-refresh
+                // MARK: - Основний список
                 ScrollView {
                     LazyVStack(spacing: 16) {
-                        // Оголошення (Announcements)
+                        
+                        // Попередження про вимкнений GPS
+                        if !locationManager.isTracking {
+                            GPSWarningBanner()
+                        }
+                        
+                        // Блок оголошень від системи
                         ForEach(announcements) { ann in
                             AnnouncementCardView(announcement: ann) { id in
                                 dismissAnnouncement(id)
@@ -81,7 +93,7 @@ struct OrdersView: View {
                             }
                             .padding(.top, 100)
                         } else {
-                            // Замовлення
+                            // Список замовлень
                             ForEach(orders) { order in
                                 OrderCardView(order: order) { jobId in
                                     acceptOrder(jobId: jobId)
@@ -91,44 +103,85 @@ struct OrdersView: View {
                     }
                     .padding()
                 }
-                .refreshable {
-                    await fetchOrders()
-                }
+                .refreshable { await refreshData() }
+            }
+            
+            // Діалог персонального замовлення (Direct Offer Overlay)
+            if let offer = directOffer {
+                DirectOfferOverlay(
+                    offer: offer,
+                    isLoading: isActionLoading,
+                    onAccept: { acceptDirectOffer(offer.id) },
+                    onDecline: { declineDirectOffer(offer.id) }
+                )
             }
         }
         .onAppear {
-            Task {
-                await fetchOrders()
-                await fetchProfileStatus()
+            locationManager.requestPermissions()
+            locationManager.startTracking()
+            
+            // ДОДАНО: Підключення WebSocket для миттєвого отримання замовлень
+            if !savedCookie.isEmpty {
+                networkManager.connectWebSocket(cookie: savedCookie)
             }
+            
+            Task { await refreshData() }
         }
-        // Оновлюємо список, якщо прийшов PUSH через WebSocket
         .onReceive(networkManager.wsEventPublisher) { event in
-            if case .newOrder = event {
-                Task { await fetchOrders() }
-            }
+            handleWSEvent(event)
         }
     }
     
-    // MARK: - Мережеві запити
+    // MARK: - Логіка
+    
+    private func handleWSEvent(_ event: WSEvent) {
+        switch event {
+        case .newOrder:
+            Task { await fetchOrders() }
+        case .directOffer:
+            Task { await fetchDirectOffers() }
+        default: break
+        }
+    }
+    
+    private func refreshData() async {
+        await fetchOrders()
+        await fetchAnnouncements()
+        await fetchProfileStatus()
+        await fetchDirectOffers()
+    }
+    
     private func fetchOrders() async {
         isLoading = true
+        let lat = locationManager.userLocation?.coordinate.latitude ?? 0.0
+        let lon = locationManager.userLocation?.coordinate.longitude ?? 0.0
+        
         do {
-            orders = try await networkManager.getOpenOrders(cookie: savedCookie, lat: currentLat, lon: currentLon)
-            // announcements = try await networkManager.getAnnouncements(...) // розкоментуйте, якщо додали цей метод
-        } catch {
-            print("Помилка завантаження замовлень: \(error)")
-        }
+            orders = try await networkManager.getOpenOrders(cookie: savedCookie, lat: lat, lon: lon)
+        } catch { print("Error fetching orders: \(error)") }
         isLoading = false
+    }
+    
+    private func fetchAnnouncements() async {
+        do {
+            announcements = try await networkManager.getAnnouncements(cookie: savedCookie)
+        } catch { print("Error fetching announcements: \(error)") }
+    }
+    
+    private func fetchDirectOffers() async {
+        do {
+            let offers = try await networkManager.getDirectOffers(cookie: savedCookie)
+            if let first = offers.first {
+                withAnimation { self.directOffer = first }
+            }
+        } catch { print("Error fetching direct offers: \(error)") }
     }
     
     private func fetchProfileStatus() async {
         do {
             let profile = try await networkManager.getProfile(cookie: savedCookie)
             isOnline = profile.isOnline
-        } catch {
-            print("Помилка завантаження профілю: \(error)")
-        }
+        } catch { print("Error fetching profile: \(error)") }
     }
     
     private func toggleStatus() {
@@ -136,9 +189,7 @@ struct OrdersView: View {
             do {
                 let response = try await networkManager.toggleStatus(cookie: savedCookie)
                 isOnline = response.isOnline
-            } catch {
-                print("Помилка зміни статусу: \(error)")
-            }
+            } catch { print("Error toggling status: \(error)") }
         }
     }
     
@@ -147,139 +198,280 @@ struct OrdersView: View {
             do {
                 let response = try await networkManager.acceptOrder(cookie: savedCookie, jobId: jobId)
                 if response.status == "ok" {
-                    // Якщо успішно взяли замовлення - вібруємо і оновлюємо список
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                     await fetchOrders()
                 }
-            } catch {
-                print("Помилка прийняття замовлення: \(error)")
-            }
+            } catch { print("Error accepting order: \(error)") }
+        }
+    }
+    
+    private func acceptDirectOffer(_ id: Int) {
+        isActionLoading = true
+        Task {
+            do {
+                let res = try await networkManager.acceptOrder(cookie: savedCookie, jobId: id)
+                if res.status == "ok" {
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    directOffer = nil
+                    // Після прийняття замовлення воно зникне зі списку доступних автоматично
+                }
+            } catch { print("Error accepting direct offer: \(error)") }
+            isActionLoading = false
+        }
+    }
+    
+    private func declineDirectOffer(_ id: Int) {
+        isActionLoading = true
+        Task {
+            do {
+                _ = try await networkManager.declineDirectOrder(cookie: savedCookie, jobId: id)
+                directOffer = nil
+            } catch { print("Error declining direct offer: \(error)") }
+            isActionLoading = false
         }
     }
     
     private func dismissAnnouncement(_ id: Int) {
-        withAnimation {
-            announcements.removeAll { $0.id == id }
-        }
-        // Можна додати запит на бекенд для приховування
+        withAnimation { announcements.removeAll { $0.id == id } }
+        Task { try? await networkManager.dismissAnnouncement(cookie: savedCookie, annId: id) }
     }
 }
 
-// MARK: - Картка Оголошення
+// MARK: - Допоміжні компоненти
+
+struct CurrentTimeView: View {
+    @State private var currentTime = ""
+    let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    
+    var body: some View {
+        Text(currentTime)
+            .font(.system(size: 16, weight: .heavy))
+            .foregroundColor(AppColors.primary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(AppColors.primary.opacity(0.08))
+            .cornerRadius(12)
+            .onReceive(timer) { _ in updateTime() }
+            .onAppear { updateTime() }
+    }
+    
+    private func updateTime() {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        currentTime = formatter.string(from: Date())
+    }
+}
+
+struct GPSWarningBanner: View {
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "location.slash.fill")
+                .foregroundColor(AppColors.warning)
+                .font(.title)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Геолокацію вимкнено")
+                    .font(.headline)
+                    .fontWeight(.bold)
+                    .foregroundColor(AppColors.primary)
+                Text("Увімкніть GPS, щоб бачити реальну відстань до замовлень 🙌")
+                    .font(.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            
+            Button("Увімкнути") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            .font(.caption)
+            .fontWeight(.bold)
+            .foregroundColor(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(AppColors.warning)
+            .cornerRadius(8)
+        }
+        .padding()
+        .background(AppColors.warning.opacity(0.15))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(AppColors.warning, lineWidth: 1))
+        .cornerRadius(16)
+    }
+}
+
+struct ReadinessTimerView: View {
+    let readyAtIso: String?
+    
+    @State private var timeText = ""
+    @State private var isLate = false
+    let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(isLate ? "🚨" : "🕰️")
+            Text(timeText)
+                .font(.caption)
+                .fontWeight(.bold)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background((isLate ? Color.red : AppColors.primary).opacity(0.1))
+        .foregroundColor(isLate ? .red : AppColors.primary)
+        .cornerRadius(8)
+        .onReceive(timer) { _ in updateTimer() }
+        .onAppear { updateTimer() }
+    }
+    
+    // ДОДАНО: Безпечний парсер дати, який розуміє мілісекунди і формат БД
+    private func parseDateSafe(_ dateStr: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        if let d = formatter.date(from: dateStr) { return d }
+        
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = formatter.date(from: dateStr) { return d }
+        
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return df.date(from: dateStr)
+    }
+    
+    private func updateTimer() {
+        guard let iso = readyAtIso, let readyDate = parseDateSafe(iso) else { return } // ВИКОРИСТОВУЄМО parseDateSafe
+        let diff = Int(readyDate.timeIntervalSinceNow)
+        isLate = diff < 0
+        let absDiff = abs(diff)
+        let m = absDiff / 60
+        let s = absDiff % 60
+        timeText = String(format: "%@ %02d:%02d", isLate ? "Запізнення" : "Готується", m, s)
+    }
+}
+
 struct AnnouncementCardView: View {
     let announcement: Announcement
     let onDismiss: (Int) -> Void
     
     var body: some View {
+        let (color, icon) = getStyle()
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "info.circle.fill")
-                .foregroundColor(.blue)
+            Image(systemName: icon)
+                .foregroundColor(color)
                 .font(.title2)
-            
             VStack(alignment: .leading, spacing: 4) {
-                Text(announcement.title)
-                    .font(.headline)
-                    .fontWeight(.bold)
-                Text(announcement.message)
-                    .font(.subheadline)
-                    .foregroundColor(AppColors.primary.opacity(0.8))
+                Text(announcement.title).font(.headline).fontWeight(.bold)
+                Text(announcement.message).font(.subheadline).foregroundColor(.primary.opacity(0.8))
             }
             Spacer()
-            
             Button(action: { onDismiss(announcement.id) }) {
-                Image(systemName: "xmark")
-                    .foregroundColor(.gray)
+                Image(systemName: "xmark").foregroundColor(.gray)
             }
         }
         .padding()
-        .background(Color.blue.opacity(0.1))
+        .background(color.opacity(0.1))
         .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(Color.blue.opacity(0.3), lineWidth: 1)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(color.opacity(0.3), lineWidth: 1))
+    }
+    
+    private func getStyle() -> (Color, String) {
+        switch announcement.style {
+        case "danger": return (.red, "exclamationmark.triangle.fill")
+        case "warning": return (.orange, "exclamationmark.circle.fill")
+        case "success": return (.green, "checkmark.seal.fill")
+        default: return (.blue, "info.circle.fill")
+        }
     }
 }
 
-// MARK: - Картка Замовлення
+struct DirectOfferOverlay: View {
+    let offer: OpenOrder
+    let isLoading: Bool
+    let onAccept: () -> Void
+    let onDecline: () -> Void
+    
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4).ignoresSafeArea()
+            VStack(spacing: 20) {
+                HStack {
+                    Image(systemName: "flame.fill").foregroundColor(.orange)
+                    Text("Ексклюзив!").font(.title3).fontWeight(.black)
+                }
+                Text("Заклад пропонує вам ще одне замовлення попутно.").font(.subheadline).multilineTextAlignment(.center)
+                
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(offer.restaurantName).fontWeight(.bold)
+                    Text(offer.dropoffAddress).font(.caption).foregroundColor(.gray)
+                    Divider()
+                    HStack {
+                        Text("Ваш дохід:")
+                        Spacer()
+                        Text("+\(Int(offer.fee)) ₴").fontWeight(.black).foregroundColor(.green)
+                    }
+                }
+                .padding().background(Color.gray.opacity(0.1)).cornerRadius(12)
+                
+                Button(action: onAccept) {
+                    if isLoading { ProgressView().tint(.white) }
+                    else { Text("🔥 Прийняти").fontWeight(.bold) }
+                }
+                .frame(maxWidth: .infinity).padding().background(Color.green).foregroundColor(.white).cornerRadius(12).disabled(isLoading)
+                
+                Button("Відмовитись", action: onDecline).foregroundColor(.red).disabled(isLoading)
+            }
+            .padding(24).background(Color.white).cornerRadius(24).padding(30)
+        }
+    }
+}
+
 struct OrderCardView: View {
     let order: OpenOrder
     let onAccept: (Int) -> Void
-    
     @State private var isExpanded = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Компактна частина
             VStack(spacing: 12) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(order.restaurantName)
-                            .font(.title3)
-                            .fontWeight(.heavy)
-                            .foregroundColor(AppColors.primary)
-                        if !isExpanded {
-                            Text(order.restaurantAddress)
-                                .font(.subheadline)
-                                .foregroundColor(AppColors.textSecondary)
-                                .lineLimit(1)
-                        }
+                        Text(order.restaurantName).font(.title3).fontWeight(.heavy).foregroundColor(AppColors.primary)
+                        if !isExpanded { Text(order.restaurantAddress).font(.subheadline).foregroundColor(AppColors.textSecondary).lineLimit(1) }
                     }
                     Spacer()
-                    
-                    Text("\(Int(order.fee)) ₴")
-                        .font(.title3)
-                        .fontWeight(.black)
-                        .foregroundColor(AppColors.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(AppColors.secondary.opacity(0.1))
-                        .cornerRadius(12)
+                    Text("\(Int(order.fee)) ₴").font(.title3).fontWeight(.black).foregroundColor(AppColors.secondary).padding(.horizontal, 12).padding(.vertical, 6).background(AppColors.secondary.opacity(0.1)).cornerRadius(12)
                 }
                 
                 HStack(spacing: 8) {
-                    // Бейдж оплати
                     Text(order.paymentType == "prepaid" ? "✨ Оплачено" : "💸 Готівка")
-                        .font(.caption)
-                        .fontWeight(.bold)
-                        .foregroundColor(order.paymentType == "prepaid" ? AppColors.secondary : AppColors.warning)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background((order.paymentType == "prepaid" ? AppColors.secondary : AppColors.warning).opacity(0.15))
-                        .cornerRadius(8)
+                        .font(.caption).fontWeight(.bold).foregroundColor(order.paymentType == "prepaid" ? AppColors.secondary : AppColors.warning)
+                        .padding(.horizontal, 10).padding(.vertical, 6).background((order.paymentType == "prepaid" ? AppColors.secondary : AppColors.warning).opacity(0.15)).cornerRadius(8)
                     
-                    if let dist = order.distToRest {
-                        Text("🛵 ~\(String(format: "%.1f", dist)) км")
-                            .font(.caption)
-                            .fontWeight(.bold)
-                            .foregroundColor(AppColors.primary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(AppColors.primary.opacity(0.08))
-                            .cornerRadius(8)
-                    }
+                    if let readyAt = order.readyAt { ReadinessTimerView(readyAtIso: readyAt) }
+                    
                     Spacer()
-                    
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .foregroundColor(.gray)
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down").foregroundColor(.gray)
                 }
             }
-            .padding(20)
-            .background(Color.white)
-            .onTapGesture {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                    isExpanded.toggle()
-                }
-            }
+            .padding(20).background(Color.white)
+            .onTapGesture { withAnimation(.spring()) { isExpanded.toggle() } }
             
-            // Розгорнута частина
             if isExpanded {
                 VStack(alignment: .leading, spacing: 16) {
                     Divider()
                     
+                    if order.paymentType == "buyout" {
+                        Text("Увага: Заберіть \(Int(order.price)) ₴ у клієнта. Повертатися в заклад не потрібно (викуп за власні кошти).")
+                            .font(.footnote)
+                            .fontWeight(.bold)
+                            .foregroundColor(AppColors.error)
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(AppColors.error.opacity(0.1))
+                            .cornerRadius(12)
+                    }
+                    
                     AddressRowView(icon: "mappin.and.ellipse", text: order.restaurantAddress, label: "Забрати")
                     
-                    // Імітація лінії між адресами
                     Rectangle()
                         .fill(Color.gray.opacity(0.3))
                         .frame(width: 2, height: 20)
@@ -306,23 +498,15 @@ struct OrderCardView: View {
                             .foregroundColor(AppColors.textSecondary)
                     }
                     
-                    // Кастомний слайдер "Свайп щоб прийняти"
-                    SwipeToAcceptButton(text: "Свайпніть, щоб прийняти >>>") {
-                        onAccept(order.id)
-                    }
-                    .padding(.top, 8)
+                    SwipeToAcceptButton(text: "Свайпніть, щоб прийняти >>>") { onAccept(order.id) }.padding(.top, 8)
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 20)
-                .background(Color.white)
+                .padding(.horizontal, 20).padding(.bottom, 20).background(Color.white)
             }
         }
-        .cornerRadius(24)
-        .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
+        .cornerRadius(24).shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
     }
 }
 
-// MARK: - Рядок адреси з іконкою
 struct AddressRowView: View {
     let icon: String
     let text: String
@@ -331,84 +515,46 @@ struct AddressRowView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
             ZStack {
-                Circle()
-                    .fill(AppColors.primary.opacity(0.08))
-                    .frame(width: 36, height: 36)
-                Image(systemName: icon)
-                    .font(.system(size: 16))
-                    .foregroundColor(AppColors.primary)
+                Circle().fill(AppColors.primary.opacity(0.08)).frame(width: 36, height: 36)
+                Image(systemName: icon).font(.system(size: 16)).foregroundColor(AppColors.primary)
             }
-            
             VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundColor(AppColors.textSecondary)
-                Text(text)
-                    .font(.callout)
-                    .fontWeight(.medium)
-                    .foregroundColor(AppColors.primary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(label).font(.caption).fontWeight(.medium).foregroundColor(AppColors.textSecondary)
+                Text(text).font(.callout).fontWeight(.medium).foregroundColor(AppColors.primary).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 }
 
-// MARK: - Кастомна кнопка "Свайп щоб прийняти"
 struct SwipeToAcceptButton: View {
     let text: String
     let onAccept: () -> Void
-    
     @State private var offset: CGFloat = 0
     let buttonHeight: CGFloat = 56
     
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
-                // Фон
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(AppColors.primary.opacity(0.15))
-                
-                // Текст
-                Text(text)
-                    .font(.subheadline)
-                    .fontWeight(.heavy)
-                    .foregroundColor(AppColors.primary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.leading, buttonHeight) // щоб текст не наїжджав на повзунок
-                
-                // Повзунок
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(AppColors.primary)
-                    .frame(width: buttonHeight, height: buttonHeight)
-                    .padding(4)
-                    .overlay(
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundColor(.white)
-                    )
+                RoundedRectangle(cornerRadius: 16).fill(AppColors.primary.opacity(0.15))
+                Text(text).font(.subheadline).fontWeight(.heavy).foregroundColor(AppColors.primary).frame(maxWidth: .infinity).padding(.leading, buttonHeight)
+                RoundedRectangle(cornerRadius: 14).fill(AppColors.primary).frame(width: buttonHeight, height: buttonHeight).padding(4)
+                    .overlay(Image(systemName: "arrow.right").font(.system(size: 20, weight: .bold)).foregroundColor(.white))
                     .offset(x: offset)
                     .gesture(
                         DragGesture()
                             .onChanged { value in
-                                // Обмежуємо рух повзунка
                                 let maxDrag = geometry.size.width - buttonHeight - 8
-                                if value.translation.width > 0 && value.translation.width < maxDrag {
-                                    offset = value.translation.width
-                                }
+                                if value.translation.width > 0 && value.translation.width < maxDrag { offset = value.translation.width }
                             }
                             .onEnded { value in
                                 let maxDrag = geometry.size.width - buttonHeight - 8
-                                // Якщо протягнули більше ніж на 70%
                                 if offset > maxDrag * 0.7 {
                                     withAnimation(.spring()) { offset = maxDrag }
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                                         onAccept()
-                                        // Повертаємо назад (на випадок помилки мережі)
                                         withAnimation(.spring()) { offset = 0 }
                                     }
                                 } else {
-                                    // Повертаємо на початок
                                     withAnimation(.spring()) { offset = 0 }
                                 }
                             }

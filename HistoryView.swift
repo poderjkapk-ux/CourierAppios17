@@ -2,334 +2,293 @@ import SwiftUI
 
 struct HistoryView: View {
     @AppStorage("cookie") var savedCookie: String = ""
-    @StateObject private var networkManager = NetworkManager.shared
     
-    // Для закриття екрану, якщо він відкритий поверх інших
-    @Environment(\.presentationMode) var presentationMode
-    
-    @State private var history: [HistoryOrder] = []
+    @State private var orders: [HistoryOrder] = []
     @State private var isLoading = false
+    @State private var errorMessage: String?
     
-    // Стан фільтрів
-    @State private var currentFilter = "Сьогодні"
-    private let filters = ["Сьогодні", "Вчора", "Обрана дата", "Всі"]
-    
-    // Стан для вибору кастомної дати
-    @State private var showDatePicker = false
-    @State private var selectedDate = Date()
-    @State private var customDateString: String? = nil
-    
-    // Обчислювана властивість для фільтрації історії
-    var filteredHistory: [HistoryOrder] {
-        let todayStr = getFormattedDate(Date())
-        let yesterdayStr = getFormattedDate(Calendar.current.date(byAdding: .day, value: -1, to: Date())!)
-        
-        return history.filter { order in
-            switch currentFilter {
-            case "Всі":
-                return true
-            case "Сьогодні":
-                return order.date.hasPrefix(todayStr)
-            case "Вчора":
-                return order.date.hasPrefix(yesterdayStr)
-            case "Обрана дата":
-                guard let custom = customDateString else { return true }
-                return order.date.hasPrefix(custom)
-            default:
-                return true
-            }
-        }
-    }
+    @State private var selectedFilter = "Сьогодні"
+    let filters = ["Сьогодні", "Вчора", "Всі"]
     
     var body: some View {
-        ZStack {
-            AppColors.background.ignoresSafeArea()
-            
-            VStack(spacing: 0) {
-                // MARK: - Верхня панель (TopBar)
-                HStack {
-                    Button(action: { presentationMode.wrappedValue.dismiss() }) {
-                        Image(systemName: "arrow.left")
-                            .font(.title2)
-                            .foregroundColor(AppColors.primary)
-                    }
-                    
-                    Text("Історія та Доходи")
-                        .font(.title2)
-                        .fontWeight(.heavy)
-                        .foregroundColor(AppColors.primary)
-                        .padding(.leading, 8)
-                    
-                    Spacer()
-                }
-                .padding()
-                .background(Color.white)
+        NavigationView {
+            ZStack {
+                // Колір фону екрану
+                Color(UIColor.systemGroupedBackground).ignoresSafeArea()
                 
-                // MARK: - Рядок фільтрів (Tabs)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
+                VStack(spacing: 0) {
+                    // Перемикач фільтрів
+                    Picker("Фільтр", selection: $selectedFilter) {
                         ForEach(filters, id: \.self) { filter in
-                            let isSelected = currentFilter == filter
-                            let displayText = (filter == "Обрана дата" && customDateString != nil) ? customDateString! : filter
-                            
-                            Button(action: {
-                                if filter == "Обрана дата" {
-                                    showDatePicker = true
-                                } else {
-                                    currentFilter = filter
-                                    customDateString = nil
-                                }
-                            }) {
-                                Text(displayText)
-                                    .font(.subheadline)
-                                    .fontWeight(.bold)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 8)
-                                    .background(isSelected ? AppColors.primary : Color.white)
-                                    .foregroundColor(isSelected ? .white : AppColors.primary)
-                                    .cornerRadius(16)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 16)
-                                            .stroke(isSelected ? AppColors.primary : Color.gray.opacity(0.3), lineWidth: 1)
-                                    )
-                            }
+                            Text(filter).tag(filter)
                         }
                     }
-                    .padding(.horizontal)
-                    .padding(.vertical, 12)
-                }
-                
-                // MARK: - Картка підсумків (Summary)
-                SummaryCard(filteredHistory: filteredHistory)
-                    .padding(.horizontal)
-                
-                // MARK: - Список замовлень
-                ScrollView {
-                    LazyVStack(spacing: 16) {
-                        if filteredHistory.isEmpty && !isLoading {
-                            VStack(spacing: 20) {
-                                Image(systemName: "calendar.badge.exclamationmark")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 80, height: 80)
-                                    .foregroundColor(Color.gray.opacity(0.3))
-                                Text("Немає замовлень за цей період")
-                                    .font(.title3)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.gray)
-                            }
-                            .padding(.top, 60)
-                        } else {
-                            ForEach(filteredHistory) { order in
-                                HistoryOrderCardView(order: order)
-                            }
-                        }
-                    }
+                    .pickerStyle(SegmentedPickerStyle())
                     .padding()
-                }
-                .refreshable {
-                    await fetchHistory()
-                }
-            }
-        }
-        .onAppear {
-            Task { await fetchHistory() }
-        }
-        // Модальне вікно вибору дати
-        .sheet(isPresented: $showDatePicker) {
-            NavigationView {
-                VStack {
-                    DatePicker("Оберіть дату", selection: $selectedDate, displayedComponents: .date)
-                        .datePickerStyle(.graphical)
+                    
+                    if isLoading && orders.isEmpty {
+                        Spacer()
+                        ProgressView("Завантаження історії...")
+                        Spacer()
+                    } else if let error = errorMessage {
+                        Spacer()
+                        VStack(spacing: 15) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.largeTitle)
+                                .foregroundColor(.gray)
+                            Text(error)
+                                .multilineTextAlignment(.center)
+                            Button("Спробувати знову") {
+                                Task { await fetchHistory() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
                         .padding()
-                        .tint(AppColors.primary)
-                    Spacer()
-                }
-                .navigationTitle("Вибір дати")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Готово") {
-                            customDateString = getFormattedDate(selectedDate)
-                            currentFilter = "Обрана дата"
-                            showDatePicker = false
+                        Spacer()
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 16) {
+                                // КАРТКА СТАТИСТИКИ (ПІДСУМКИ)
+                                SummaryCardView(
+                                    count: completedCount,
+                                    earned: totalEarned,
+                                    commission: totalCommission,
+                                    profit: netProfit
+                                )
+                                .padding(.horizontal)
+                                
+                                // СПИСОК ЗАМОВЛЕНЬ
+                                if filteredOrders.isEmpty {
+                                    VStack(spacing: 16) {
+                                        Image(systemName: "calendar.badge.exclamationmark")
+                                            .font(.system(size: 50))
+                                            .foregroundColor(.gray.opacity(0.5))
+                                        Text("За цей період замовлень не знайдено")
+                                            .foregroundColor(.gray)
+                                            .font(.headline)
+                                    }
+                                    .padding(.top, 40)
+                                } else {
+                                    LazyVStack(spacing: 16) {
+                                        ForEach(filteredOrders, id: \.id) { order in
+                                            HistoryOrderCard(order: order)
+                                        }
+                                    }
+                                    .padding(.horizontal)
+                                }
+                            }
+                            .padding(.bottom, 20)
                         }
-                        .fontWeight(.bold)
-                    }
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button("Скасувати") {
-                            showDatePicker = false
+                        .refreshable {
+                            await fetchHistory()
                         }
                     }
                 }
             }
-            .presentationDetents([.medium])
+            .navigationTitle("Історія та Доходи")
+            .onAppear {
+                Task { await fetchHistory() }
+            }
         }
     }
     
-    // MARK: - Логіка
-    private func fetchHistory() async {
-        isLoading = true
-        do {
-            history = try await networkManager.getHistory(cookie: savedCookie)
-        } catch {
-            print("Помилка завантаження історії: \(error)")
+    // MARK: - Логіка фільтрації та підрахунку
+    
+    private var filteredOrders: [HistoryOrder] {
+        let today = getFormattedDate(Date())
+        let yesterday = getFormattedDate(Calendar.current.date(byAdding: .day, value: -1, to: Date())!)
+        
+        switch selectedFilter {
+        case "Сьогодні":
+            return orders.filter { $0.date.hasPrefix(today) }
+        case "Вчора":
+            return orders.filter { $0.date.hasPrefix(yesterday) }
+        default:
+            return orders
         }
-        isLoading = false
     }
+    
+    // Підрахунок ТІЛЬКИ для доставлених замовлень
+    private var deliveredOrders: [HistoryOrder] {
+        filteredOrders.filter { $0.status.lowercased() == "delivered" || $0.status.lowercased() == "виконано" }
+    }
+    
+    private var completedCount: Int { deliveredOrders.count }
+    
+    private var totalEarned: Double { deliveredOrders.reduce(0) { $0 + $1.price } }
+    
+    private var totalCommission: Double { deliveredOrders.reduce(0) { $0 + ($1.commission ?? 0.0) } }
+    
+    private var netProfit: Double { totalEarned - totalCommission }
     
     private func getFormattedDate(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "dd.MM"
+        formatter.dateFormat = "dd.MM" // Формат як в Android
         return formatter.string(from: date)
     }
-}
-
-// MARK: - Картка підсумків (Фінансова статистика)
-struct SummaryCard: View {
-    let filteredHistory: [HistoryOrder]
     
-    var body: some View {
-        let deliveredOrders = filteredHistory.filter { $0.status == "delivered" }
-        let completedCount = deliveredOrders.count
-        let totalEarned = deliveredOrders.reduce(0.0) { $0 + $1.price }
-        let totalCommission = deliveredOrders.reduce(0.0) { $0 + ($1.commission ?? 0.0) }
-        let netProfit = totalEarned - totalCommission
+    // MARK: - Мережа
+    private func fetchHistory() async {
+        if savedCookie.isEmpty {
+            self.errorMessage = "Потрібна авторизація"
+            return
+        }
         
-        VStack(spacing: 16) {
-            HStack {
-                Text("Чистий прибуток")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundColor(.white.opacity(0.8))
-                Spacer()
-                Text("\(completedCount) замовлень")
-                    .font(.caption)
-                    .fontWeight(.bold)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.2))
-                    .cornerRadius(8)
+        isLoading = true
+        errorMessage = nil
+        
+        do {
+            let fetchedOrders = try await NetworkManager.shared.getHistory(cookie: savedCookie)
+            DispatchQueue.main.async {
+                self.orders = fetchedOrders.sorted(by: { $0.id > $1.id })
+                self.isLoading = false
             }
-            
-            HStack {
-                Text("₴ \(String(format: "%.2f", netProfit))")
-                    .font(.system(size: 36, weight: .black, design: .rounded))
-                    .foregroundColor(.white)
-                Spacer()
-            }
-            
-            Divider()
-                .background(Color.white.opacity(0.3))
-            
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Дохід з доставок")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
-                    Text("+ ₴\(String(format: "%.2f", totalEarned))")
-                        .font(.headline)
-                        .fontWeight(.bold)
-                        .foregroundColor(AppColors.secondary)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text("Комісія сервісу")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
-                    Text("- ₴\(String(format: "%.2f", totalCommission))")
-                        .font(.headline)
-                        .fontWeight(.bold)
-                        .foregroundColor(AppColors.error)
-                }
+        } catch {
+            DispatchQueue.main.async {
+                self.errorMessage = "Не вдалося завантажити історію."
+                self.isLoading = false
             }
         }
-        .padding(20)
-        .background(
-            LinearGradient(gradient: Gradient(colors: [AppColors.primary, Color(red: 15/255, green: 23/255, blue: 42/255)]), startPoint: .topLeading, endPoint: .bottomTrailing)
-        )
-        .cornerRadius(20)
-        .shadow(color: AppColors.primary.opacity(0.2), radius: 12, y: 5)
     }
 }
 
-// MARK: - Картка окремого замовлення в історії
-struct HistoryOrderCardView: View {
-    let order: HistoryOrder
+// MARK: - Компоненти UI
+
+struct SummaryCardView: View {
+    let count: Int
+    let earned: Double
+    let commission: Double
+    let profit: Double
     
     var body: some View {
-        let isDelivered = order.status == "delivered"
-        
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
+            VStack(spacing: 16) {
+                HStack {
+                    Text("Чистий прибуток")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.8))
+                    Spacer()
+                    Text("\(count) замовлень")
+                        .font(.caption)
+                        .bold()
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.2))
+                        .cornerRadius(8)
+                        .foregroundColor(.white)
+                }
+                
+                HStack {
+                    Text("₴ \(String(format: "%.2f", profit))")
+                        .font(.system(size: 36, weight: .black))
+                        .foregroundColor(.white)
+                    Spacer()
+                }
+                
+                Divider().background(Color.white.opacity(0.3))
+                
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Дохід з доставок")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        Text("+ ₴\(String(format: "%.2f", earned))")
+                            .font(.headline)
+                            .foregroundColor(Color.green)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("Комісія сервісу")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        Text("- ₴\(String(format: "%.2f", commission))")
+                            .font(.headline)
+                            .foregroundColor(Color.red)
+                    }
+                }
+            }
+            .padding(20)
+            .background(
+                LinearGradient(
+                    gradient: Gradient(colors: [Color(red: 0.12, green: 0.16, blue: 0.23), Color(red: 0.06, green: 0.09, blue: 0.16)]),
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+        .cornerRadius(24)
+        .shadow(color: Color(red: 0.12, green: 0.16, blue: 0.23).opacity(0.3), radius: 10, x: 0, y: 5)
+    }
+}
+
+struct HistoryOrderCard: View {
+    let order: HistoryOrder
+    
+    var isDelivered: Bool {
+        order.status.lowercased() == "delivered" || order.status.lowercased() == "виконано"
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Замовлення #\(order.id)")
                     .font(.headline)
                     .fontWeight(.heavy)
-                    .foregroundColor(AppColors.primary)
                 Spacer()
                 Text(order.date)
                     .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundColor(AppColors.textSecondary)
+                    .foregroundColor(.gray)
             }
             
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(AppColors.primary.opacity(0.08))
-                        .frame(width: 32, height: 32)
-                    Image(systemName: "mappin.and.ellipse")
-                        .font(.system(size: 14))
-                        .foregroundColor(AppColors.primary)
-                }
+            HStack(alignment: .top) {
+                Image(systemName: "mappin.and.ellipse")
+                    .foregroundColor(Color(red: 0.12, green: 0.16, blue: 0.23))
+                    .padding(.top, 2)
                 Text(order.address)
                     .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundColor(AppColors.primary)
                     .fixedSize(horizontal: false, vertical: true)
-                Spacer()
             }
             
             HStack(alignment: .bottom) {
                 // Статус
                 Text(isDelivered ? "Виконано" : "Скасовано")
-                    .font(.subheadline)
-                    .fontWeight(.bold)
-                    .foregroundColor(isDelivered ? AppColors.secondary : AppColors.error)
+                    .font(.caption)
+                    .bold()
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background((isDelivered ? AppColors.secondary : AppColors.error).opacity(0.1))
+                    .background(isDelivered ? Color.green.opacity(0.15) : Color.red.opacity(0.15))
+                    .foregroundColor(isDelivered ? .green : .red)
                     .cornerRadius(8)
                 
                 Spacer()
                 
-                // Гроші
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text("+\(String(format: "%.0f", order.price)) ₴")
+                // Фінанси
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text("+\(String(format: "%.2f", order.price)) ₴")
                         .font(.title3)
                         .fontWeight(.black)
-                        .foregroundColor(isDelivered ? AppColors.secondary : AppColors.textSecondary)
+                        .foregroundColor(isDelivered ? .green : .gray)
                     
-                    if isDelivered, let commission = order.commission, commission > 0 {
-                        Text("Комісія: -\(String(format: "%.0f", commission)) ₴")
+                    if isDelivered, let comm = order.commission, comm > 0 {
+                        Text("Комісія: -\(String(format: "%.2f", comm)) ₴")
                             .font(.caption)
-                            .fontWeight(.bold)
-                            .foregroundColor(AppColors.error)
+                            .bold()
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(AppColors.error.opacity(0.1))
+                            .background(Color.red.opacity(0.1))
+                            .foregroundColor(.red)
+                            .cornerRadius(6)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
-                                    .stroke(AppColors.error.opacity(0.2), lineWidth: 1)
+                                    .stroke(Color.red.opacity(0.2), lineWidth: 1)
                             )
                     }
                 }
             }
         }
         .padding(20)
-        .background(Color.white)
-        .cornerRadius(20)
-        .shadow(color: Color.black.opacity(0.05), radius: 8, y: 4)
+        .background(Color(UIColor.systemBackground))
+        .cornerRadius(24)
+        .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 4)
     }
 }

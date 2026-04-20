@@ -17,6 +17,7 @@ struct ProfileView: View {
     
     var body: some View {
         ZStack {
+            // Цвета AppColors определены в OrdersView.swift
             AppColors.background.ignoresSafeArea()
             
             if isLoading {
@@ -137,11 +138,17 @@ struct ProfileView: View {
                     .padding()
                 }
             } else {
-                Text("Помилка завантаження")
-                    .foregroundColor(AppColors.error)
+                VStack {
+                    Text("Помилка завантаження")
+                        .foregroundColor(AppColors.error)
+                    Button("Спробувати ще раз") {
+                        Task { await loadData() }
+                    }
+                    .padding(.top, 10)
+                }
             }
             
-            // Простой Toast для уведомлений (вместо Android Toast)
+            // Простой Toast для уведомлений
             if showToast {
                 VStack {
                     Spacer()
@@ -171,41 +178,92 @@ struct ProfileView: View {
     }
     
     // MARK: - Методы
-    private func loadData() async {
-        isLoading = true
-        do {
-            async let fetchProfile = networkManager.getProfile(cookie: savedCookie)
-            // Если вы добавили getMotivators в NetworkManager:
-            // async let fetchMotivators = networkManager.getMotivators(cookie: savedCookie)
-            
-            self.profile = try await fetchProfile
-            // self.motivators = try await fetchMotivators 
-            // Пока оставляем пустым, если метод еще не написан
-        } catch {
-            print("Помилка завантаження профілю: \(error)")
-        }
-        isLoading = false
-    }
     
+    // <-- ИСПРАВЛЕНО: Теперь параллельно грузим и профиль, и мотиваторы
+    // MARK: - Методы
+        
+        private func loadData() async {
+            isLoading = true
+            do {
+                async let fetchProfile = networkManager.getProfile(cookie: savedCookie)
+                async let fetchMotivators = networkManager.getMotivators(cookie: savedCookie)
+                
+                let (profileResult, motivatorsResult) = try await (fetchProfile, fetchMotivators)
+                self.profile = profileResult
+                
+                // ФІЛЬТРАЦІЯ МОТИВАТОРІВ
+                self.motivators = motivatorsResult.filter { motivator in
+                    // 1. Відразу ховаємо прострочені або скасовані системою
+                    if motivator.status == "expired" || motivator.status == "cancelled" {
+                        return false
+                    }
+                    
+                    // 2. Якщо ціль виконана (комісія вже знижена)
+                    if motivator.status == "completed" {
+                        // Перевіряємо дату закінчення періоду зниженої комісії
+                        guard let endDateStr = motivator.rewardEndDate,
+                              let endDate = parseDate(endDateStr) else {
+                            // Якщо дата не вказана, але ціль закрита — ховаємо
+                            return false
+                        }
+                        
+                        // Залишаємо картку ТІЛЬКИ якщо поточний час менший за дату закінчення знижки
+                        return Date() < endDate
+                    }
+                    
+                    // 3. Всі інші (активні цілі, які кур'єр ще виконує) — показуємо
+                    return true
+                }
+                
+            } catch {
+                print("Помилка завантаження профілю або мотиваторів: \(error)")
+            }
+            isLoading = false
+        }
+        
+        // Допоміжна функція для надійного парсингу ISO8601 дат з бекенду
+        private func parseDate(_ isoString: String) -> Date? {
+            let formatter = ISO8601DateFormatter()
+            // Спочатку пробуємо розпарсити з мілісекундами
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = formatter.date(from: isoString) { return d }
+            
+            // Якщо бекенд віддає без мілісекунд
+            let fallbackFormatter = ISO8601DateFormatter()
+            return fallbackFormatter.date(from: isoString)
+        }
+    
+    // <-- ИСПРАВЛЕНО: Реальная отправка на сервер
     private func sendFeedback() {
-        guard !feedbackText.isEmpty else { return }
+        guard !feedbackText.isEmpty, let currentProfile = profile else { return }
         isFeedbackSending = true
         
-        // Здесь должен быть вызов NetworkManager.shared.sendFeedback
-        // Так как это демонстрация, имитируем отправку:
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            isFeedbackSending = false
-            feedbackText = ""
-            toastMessage = "✅ Дякуємо! Звернення відправлено."
-            showToast = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                showToast = false
+        Task {
+            do {
+                let response = try await networkManager.sendFeedback(
+                    role: "courier",
+                    name: currentProfile.name,
+                    phone: currentProfile.phone,
+                    message: feedbackText
+                )
+                
+                if response.status == "ok" {
+                    feedbackText = ""
+                    toastMessage = "✅ Дякуємо! Звернення відправлено."
+                    showToast = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showToast = false }
+                }
+            } catch {
+                print("Помилка відправки підтримки: \(error)")
+                toastMessage = "❌ Помилка з'єднання."
+                showToast = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showToast = false }
             }
+            isFeedbackSending = false
         }
     }
     
     private func logout() {
-        // Очищаем токен. ContentView автоматически выбросит нас на LoginView
         savedCookie = ""
         networkManager.disconnectWebSocket()
     }
@@ -262,7 +320,8 @@ struct MotivatorCardView: View {
                     
                     RoundedRectangle(cornerRadius: 5)
                         .fill(AppColors.secondary)
-                        .frame(width: geometry.size.width * CGFloat(motivator.progressPercent) / 100, height: 10)
+                        // Защита от деления на ноль или некорректных значений прогресса
+                        .frame(width: max(0, geometry.size.width * CGFloat(motivator.progressPercent) / 100), height: 10)
                 }
             }
             .frame(height: 10)

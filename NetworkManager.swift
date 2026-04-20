@@ -185,6 +185,7 @@ struct HistoryOrder: Codable, Identifiable {
     let price: Double
     let status: String
     let commission: Double?
+    
 }
 
 // MARK: - 2. СОБЫТИЯ WEBSOCKET
@@ -195,6 +196,7 @@ enum WSEvent {
     case jobUpdate
     case jobReady
     case directOffer(String)
+    case chatMessage(jobId: Int, message: ChatMessage) // <-- ДОБАВЛЕНО ДЛЯ ЧАТА
 }
 
 // MARK: - 3. МЕНЕДЖЕР СЕТИ (NetworkManager)
@@ -258,21 +260,61 @@ class NetworkManager: ObservableObject {
         let (_, response) = try await URLSession.shared.data(for: request)
         
         if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-            // Безопасное чтение куков без зависимости от регистра заголовков
+            
+            // 1. НАДЕЖНЫЙ МЕТОД:
+            // Бэкенд делает 302 редирект, поэтому заголовок Set-Cookie "теряется" при автоматическом переходе.
+            // Но iOS заботливо сохраняет куки в глобальное хранилище. Достаем токен оттуда:
+            if let url = URL(string: baseURL), let cookies = HTTPCookieStorage.shared.cookies(for: url) {
+                if let tokenCookie = cookies.first(where: { $0.name == "courier_token" }) {
+                    return tokenCookie.value
+                }
+            }
+            
+            // Запасной вариант - поиск по всем куки хранилища
+            if let allCookies = HTTPCookieStorage.shared.cookies {
+                if let tokenCookie = allCookies.first(where: { $0.name == "courier_token" }) {
+                    return tokenCookie.value
+                }
+            }
+            
+            // 2. РЕЗЕРВНЫЙ МЕТОД: Парсинг из заголовка (на случай, если сервер вернет 200 JSON вместо 302)
             if let setCookie = httpResponse.value(forHTTPHeaderField: "Set-Cookie"), setCookie.contains("courier_token") {
                 let parts = setCookie.split(separator: ";")
-                if let tokenPart = parts.first {
-                    return String(tokenPart).replacingOccurrences(of: "courier_token=", with: "")
+                if let tokenPart = parts.first(where: { $0.contains("courier_token") }) {
+                    return String(tokenPart).replacingOccurrences(of: "courier_token=", with: "").trimmingCharacters(in: .whitespaces)
                 }
             }
         }
         return nil
     }
     
+    // ДОБАВЛЕНО: Сброс пароля
+    func resetCourierPassword(phone: String) async throws -> StatusResponse {
+        let body = createFormBody(parameters: ["phone": phone])
+        let request = createRequest(path: "/api/courier/reset_password", method: "POST", isForm: true, body: body)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(StatusResponse.self, from: data)
+    }
+    
     func getOpenOrders(cookie: String, lat: Double, lon: Double) async throws -> [OpenOrder] {
         let request = createRequest(path: "/api/courier/open_orders?lat=\(lat)&lon=\(lon)", cookie: cookie)
         let (data, _) = try await URLSession.shared.data(for: request)
         return try JSONDecoder().decode([OpenOrder].self, from: data)
+    }
+    
+    // ДОБАВЛЕНО: Получение персональных заказов (Direct Offers)
+    func getDirectOffers(cookie: String) async throws -> [OpenOrder] {
+        let request = createRequest(path: "/api/courier/direct_offers", cookie: cookie)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode([OpenOrder].self, from: data)
+    }
+    
+    // ДОБАВЛЕНО: Отклонение персонального заказа
+    func declineDirectOrder(cookie: String, jobId: Int) async throws -> StatusResponse {
+        let body = createFormBody(parameters: ["job_id": "\(jobId)"])
+        let request = createRequest(path: "/api/courier/decline_direct_order", method: "POST", cookie: cookie, isForm: true, body: body)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(StatusResponse.self, from: data)
     }
     
     func getActiveJob(cookie: String, jobId: Int? = nil) async throws -> ActiveJobResponse {
@@ -328,6 +370,35 @@ class NetworkManager: ObservableObject {
         let request = createRequest(path: "/api/courier/profile", cookie: cookie)
         let (data, _) = try await URLSession.shared.data(for: request)
         return try JSONDecoder().decode(CourierProfile.self, from: data)
+    }
+    
+    // ДОБАВЛЕНО: Получение мотиваторов
+    func getMotivators(cookie: String) async throws -> [Motivator] {
+        let request = createRequest(path: "/api/courier/motivators", cookie: cookie)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode([Motivator].self, from: data)
+    }
+    
+    // ДОБАВЛЕНО: Отправка фидбека в поддержку
+    func sendFeedback(role: String, name: String, phone: String, message: String) async throws -> StatusResponse {
+        let body = createFormBody(parameters: ["role": role, "name": name, "phone": phone, "message": message])
+        let request = createRequest(path: "/api/feedback", method: "POST", isForm: true, body: body)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(StatusResponse.self, from: data)
+    }
+    
+    // ДОБАВЛЕНО: Получение объявлений
+    func getAnnouncements(cookie: String) async throws -> [Announcement] {
+        let request = createRequest(path: "/api/courier/announcements", cookie: cookie)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode([Announcement].self, from: data)
+    }
+    
+    // ДОБАВЛЕНО: Скрытие объявления
+    func dismissAnnouncement(cookie: String, annId: Int) async throws -> StatusResponse {
+        let request = createRequest(path: "/api/courier/announcements/\(annId)/dismiss", method: "POST", cookie: cookie)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(StatusResponse.self, from: data)
     }
     
     func getHistory(cookie: String) async throws -> [HistoryOrder] {
@@ -478,6 +549,7 @@ class NetworkManager: ObservableObject {
         }
     }
     
+    // ОБНОВЛЕНО: Полная обработка входящих сообщений (включая ЧАТ)
     private func handleIncomingMessage(_ text: String) {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -485,11 +557,24 @@ class NetworkManager: ObservableObject {
         
         DispatchQueue.main.async {
             switch type {
-            case "auth_error": self.wsEventPublisher.send(.authError)
-            case "new_order": self.wsEventPublisher.send(.newOrder)
-            case "job_update": self.wsEventPublisher.send(.jobUpdate)
-            case "job_ready": self.wsEventPublisher.send(.jobReady)
-            case "direct_offer": self.wsEventPublisher.send(.directOffer(text))
+            case "auth_error":
+                self.wsEventPublisher.send(.authError)
+            case "new_order":
+                self.wsEventPublisher.send(.newOrder)
+            case "job_update":
+                self.wsEventPublisher.send(.jobUpdate)
+            case "job_ready":
+                self.wsEventPublisher.send(.jobReady)
+            case "direct_offer":
+                self.wsEventPublisher.send(.directOffer(text))
+            case "chat_message": // <-- ОБРАБОТКА ЧАТА
+                if let jobId = json["job_id"] as? Int,
+                   let role = json["role"] as? String,
+                   let msgText = json["text"] as? String,
+                   let time = json["time"] as? String {
+                    let newMessage = ChatMessage(role: role, text: msgText, time: time)
+                    self.wsEventPublisher.send(.chatMessage(jobId: jobId, message: newMessage))
+                }
             default: break
             }
         }

@@ -86,7 +86,9 @@ struct RegistrationView: View {
                                 if isLoading && verificationLink == nil {
                                     ProgressView().tint(.white)
                                 } else {
+                                    Image(systemName: "paperplane.fill")
                                     Text("Підтвердити через Telegram")
+                                        .fontWeight(.bold)
                                 }
                             }
                             .frame(maxWidth: .infinity)
@@ -97,14 +99,20 @@ struct RegistrationView: View {
                         }
                         .disabled(isLoading)
                         
-                        if let link = verificationLink, let url = URL(string: link) {
-                            Text("Очікуємо підтвердження в боті...")
-                                .font(.footnote)
-                                .foregroundColor(.gray)
-                            
-                            Link("Відкрити Telegram бота", destination: url)
+                        if let link = verificationLink {
+                            VStack(spacing: 8) {
+                                Text("Очікуємо підтвердження в боті...")
+                                    .font(.footnote)
+                                    .foregroundColor(.gray)
+                                
+                                Button("Відкрити Telegram ще раз") {
+                                    openTelegramApp(link: link)
+                                }
                                 .font(.subheadline)
                                 .foregroundColor(.blue)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 4)
                         }
                     }
                 }
@@ -150,6 +158,9 @@ struct RegistrationView: View {
                                 Image(systemName: "camera.fill")
                                     .font(.title2)
                                     .foregroundColor(.blue)
+                                    .frame(width: 60, height: 60)
+                                    .background(Color.blue.opacity(0.1))
+                                    .cornerRadius(8)
                             }
                         }
                     }
@@ -172,6 +183,9 @@ struct RegistrationView: View {
                                 Image(systemName: "person.crop.circle.badge.plus")
                                     .font(.title2)
                                     .foregroundColor(.blue)
+                                    .frame(width: 60, height: 60)
+                                    .background(Color.blue.opacity(0.1))
+                                    .cornerRadius(8)
                             }
                         }
                     }
@@ -201,6 +215,7 @@ struct RegistrationView: View {
                             ProgressView().tint(.white)
                         } else {
                             Text("Зареєструватися")
+                                .fontWeight(.bold)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -225,8 +240,6 @@ struct RegistrationView: View {
                 }
             )
         }
-        // 🚨 КРИТИЧНОЕ ИСПРАВЛЕНИЕ УТЕЧКИ:
-        // Если экран закрывается, принудительно убиваем задачу поллинга, чтобы она не "стучала" на бэкенд вечно
         .onDisappear {
             pollingTask?.cancel()
         }
@@ -262,12 +275,8 @@ struct RegistrationView: View {
             verificationToken = response.token
             verificationLink = response.link
             
-            // Открываем браузер/телеграм сразу
-            if let url = URL(string: response.link) {
-                DispatchQueue.main.async {
-                    UIApplication.shared.open(url)
-                }
-            }
+            // Вызываем умное открытие Telegram
+            openTelegramApp(link: response.link)
             
             // Запускаем безопасный поллинг
             startSafePolling(token: response.token)
@@ -279,21 +288,38 @@ struct RegistrationView: View {
         isLoading = false
     }
     
+    // <-- ДОБАВЛЕНО: Умное конвертирование ссылки для iOS
+    private func openTelegramApp(link: String) {
+        DispatchQueue.main.async {
+            // Пробуем создать нативный Deep Link (tg://resolve?domain=botname&start=token)
+            if link.contains("t.me/") {
+                var tgLink = link.replacingOccurrences(of: "https://t.me/", with: "tg://resolve?domain=")
+                tgLink = tgLink.replacingOccurrences(of: "?start=", with: "&start=")
+                
+                if let tgUrl = URL(string: tgLink), UIApplication.shared.canOpenURL(tgUrl) {
+                    UIApplication.shared.open(tgUrl)
+                    return
+                }
+            }
+            
+            // Если tg:// не сработал (например, Telegram не установлен), открываем обычную ссылку в браузере
+            if let webUrl = URL(string: link) {
+                UIApplication.shared.open(webUrl)
+            }
+        }
+    }
+    
     private func startSafePolling(token: String) {
-        // Убиваем старый поллинг, если он вдруг работал
         pollingTask?.cancel()
         
-        // Создаем новую задачу
         pollingTask = Task {
             var attempts = 0
             let maxAttempts = 100 // 5 минут (100 итераций по 3 секунды)
             
             while !isPhoneVerified && attempts < maxAttempts {
-                // 🚨 Проверка отмены: Если Task убит (пользователь ушел с экрана), выходим из цикла!
                 if Task.isCancelled { break }
                 
                 do {
-                    // Пауза 3 секунды
                     try await Task.sleep(nanoseconds: 3_000_000_000)
                     
                     let response = try await NetworkManager.shared.checkVerification(token: token)
@@ -302,7 +328,7 @@ struct RegistrationView: View {
                             self.isPhoneVerified = true
                             self.verificationLink = nil
                         }
-                        break // Успех! Выходим из цикла
+                        break
                     }
                 } catch {
                     print("Polling error: \(error.localizedDescription)")
@@ -310,7 +336,6 @@ struct RegistrationView: View {
                 attempts += 1
             }
             
-            // Если вышли по таймауту, но не отменены и не верифицированы
             if !Task.isCancelled && !isPhoneVerified {
                 DispatchQueue.main.async {
                     self.errorMessage = "Час очікування підтвердження вичерпано."

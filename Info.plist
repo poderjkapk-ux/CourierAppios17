@@ -2,9 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>location</string>
-	</array>
+    <key>NSLocationWhenInUseUsageDescription</key>
+        <string>Нам потрібна ваша геолокація для відстеження доставки.</string>
+        <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+        <string>Нам потрібна ваша геолокація для роботи у фоновому режимі та розрахунку маршруту.</string>
+        <key>NSLocationAlwaysUsageDescription</key>
+        <string>Нам потрібна ваша геолокація для відстеження кур'єра у фоні.</string>
+        
+        <key>UIBackgroundModes</key>
+        <array>
+            <string>location</string>
+            <string>remote-notification</string> </array>
 </dict>
 </plist>

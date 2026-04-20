@@ -1,4 +1,5 @@
 import SwiftUI
+import FirebaseMessaging
 
 struct LoginView: View {
     @State private var phone = ""
@@ -37,6 +38,7 @@ struct LoginView: View {
                     TextField("Номер телефону", text: $phone)
                         .keyboardType(.phonePad)
                         .autocapitalization(.none)
+                        .disableAutocorrection(true)
                 }
                 .padding()
                 .background(Color(.systemGray6))
@@ -64,6 +66,8 @@ struct LoginView: View {
             
             // Кнопка входа
             Button(action: {
+                // Прячем клавиатуру перед запросом
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                 Task {
                     await performLogin()
                 }
@@ -72,13 +76,15 @@ struct LoginView: View {
                     if isLoading {
                         ProgressView()
                             .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            // Фикс ошибки NaN: жестко задаем размер колесика
+                            .frame(width: 24, height: 24)
                     } else {
                         Text("Увійти")
                             .fontWeight(.bold)
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .padding()
+                .frame(height: 50)
                 .background(phone.isEmpty || password.isEmpty ? Color.blue.opacity(0.5) : Color.blue)
                 .foregroundColor(.white)
                 .cornerRadius(12)
@@ -106,37 +112,43 @@ struct LoginView: View {
         isLoading = true
         errorMessage = nil
         
-        // 1. Очищаем введенный номер от плюсов, пробелов, скобок и тире
+        // 1. Полная очистка, включая удаление плюса (как было изначально)
         let cleanPhone = phone
             .replacingOccurrences(of: "+", with: "")
             .replacingOccurrences(of: " ", with: "")
             .replacingOccurrences(of: "-", with: "")
             .replacingOccurrences(of: "(", with: "")
             .replacingOccurrences(of: ")", with: "")
-        
-        // Если пользователь ввел просто "093...", автоматически подставляем "38"
+            
         var finalPhone = cleanPhone
         if finalPhone.hasPrefix("0") && finalPhone.count == 10 {
             finalPhone = "38" + finalPhone
         }
         
-        print("Отправляем на сервер телефон: \(finalPhone)")
-        
         do {
-            // 2. Отправляем очищенный номер (finalPhone) вместо сырого (phone)
+            // 2. Отправляем правильный номер
             if let cookie = try await NetworkManager.shared.login(phone: finalPhone, password: password) {
-                // Очищаем куки от лишних пробелов, если они есть
                 let cleanCookie = cookie.trimmingCharacters(in: .whitespaces)
-                
                 self.savedCookie = cleanCookie
+                
+                // --- ОБНОВЛЕНИЕ ТОКЕНА ДЛЯ ПУШЕЙ ---
+                // Принудительно обновляем FCM токен на бэкенде после логина
+                Messaging.messaging().token { token, error in
+                    if let fcmToken = token {
+                        Task {
+                            _ = try? await NetworkManager.shared.sendFcmToken(cookie: cleanCookie, token: fcmToken)
+                        }
+                    }
+                }
+                // -----------------------------------
+                
                 self.isLoading = false
-                print("Вход выполнен, куки сохранены")
             } else {
-                errorMessage = "Помилка входу. Перевірте номер та пароль."
+                errorMessage = "Невірний логін або пароль."
                 isLoading = false
             }
         } catch {
-            errorMessage = "Помилка з'єднання: \(error.localizedDescription)"
+            errorMessage = "Помилка сервера: \(error.localizedDescription)"
             isLoading = false
         }
     }
