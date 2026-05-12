@@ -5,7 +5,7 @@ workflows:
     
     # 1. Подключение к Apple Developer
     integrations:
-      app_store_connect: "Apple Key" # Убедитесь, что ваш ключ в Codemagic назван именно так
+      app_store_connect: "Codemagic" # Убедитесь, что ваш ключ в Codemagic назван именно так
       
     # 2. Настройки окружения и подписи
     environment:
