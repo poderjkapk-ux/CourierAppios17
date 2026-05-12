@@ -1,0 +1,16 @@
+workflows:
+  ios-release:
+    name: Courier App Release
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+    scripts:
+      - name: Сборка приложения (Build IPA)
+        script: |
+          # Скрипт автоматически найдет ваш файл проекта, где бы он ни лежал
+          PROJECT_PATH=$(find . -name "CourierApp.xcodeproj" | head -n 1)
+          xcode-project build-ipa \
+            --project "$PROJECT_PATH" \
+            --scheme "CourierApp"
+    artifacts:
+      - build/ios/ipa/*.ipa
