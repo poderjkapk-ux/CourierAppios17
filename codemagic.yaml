@@ -2,20 +2,42 @@ workflows:
   ios-release:
     name: Courier App Release
     instance_type: mac_mini_m2
+    
+    # 1. Подключение к Apple Developer
     integrations:
-      app_store_connect: "Apple Key" # <--- Проверьте, что в Codemagic ключ называется именно так
+      app_store_connect: "Apple Key" # Убедитесь, что ваш ключ в Codemagic назван именно так
+      
+    # 2. Настройки окружения и подписи
     environment:
       xcode: latest
       ios_signing:
         distribution_type: app_store
         bundle_identifier: restify.CourierApp
+        
+    # 3. Шаги сборки
     scripts:
-      - name: Сборка приложения (Build IPA)
+      - name: Сборка приложения (Build and Sign IPA)
         script: |
-          # Скрипт сам найдет проект в папке CourierAppios16
+          # Автоматический поиск проекта
           PROJECT_PATH=$(find . -name "*.xcodeproj" | head -n 1)
+          
+          # Ключевой момент: флаг --export-options-plist заставляет Xcode 
+          # использовать правильные Provisioning Profiles, которые Codemagic
+          # только что сгенерировал/скачал для restify.CourierApp
           xcode-project build-ipa \
             --project "$PROJECT_PATH" \
-            --scheme "CourierApp"
+            --scheme "CourierApp" \
+            --export-options-plist /Users/builder/export_options.plist
+            
+    # 4. Сохранение собранного файла
     artifacts:
       - build/ios/ipa/*.ipa
+      
+    # 5. Автоматическая загрузка в TestFlight (Опционально)
+    publishing:
+      app_store_connect:
+        auth: integration
+        
+        # Если поставить true, Codemagic сам загрузит билд в TestFlight
+        # и распределит его тестировщикам, как только Apple его обработает
+        submit_to_testflight: true
