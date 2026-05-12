@@ -4,11 +4,13 @@ workflows:
     instance_type: mac_mini_m2
     environment:
       xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: restify.CourierApp
     scripts:
       - name: Сборка приложения (Build IPA)
         script: |
-          # Скрипт автоматически найдет ваш файл проекта, где бы он ни лежал
-          PROJECT_PATH=$(find . -name "CourierApp.xcodeproj" | head -n 1)
+          PROJECT_PATH=$(find . -name "*.xcodeproj" | head -n 1)
           xcode-project build-ipa \
             --project "$PROJECT_PATH" \
             --scheme "CourierApp"
